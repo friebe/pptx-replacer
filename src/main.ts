@@ -1,46 +1,112 @@
-import fs from 'fs';
 import PizZip from 'pizzip';
+import { readFileSync, writeFileSync } from 'fs';
+import { DOMParser, XMLSerializer } from '@xmldom/xmldom'
 
-function replacePlaceholders(xmlContent: string, data: Record<string, string>): string {
-  for (const [key, value] of Object.entries(data)) {
-    const regex = new RegExp(`\\$${key}`, 'g');
-    xmlContent = xmlContent.replace(regex, value);
-  }
-  return xmlContent;
+// Fügt ein Bild in das ZIP-Archiv ein
+function addImageToZip(zip: PizZip, imagePath: string): string {
+    const imgData = readFileSync(imagePath);
+    const imgExt = imagePath.split('.').pop();
+    const imgFilename = `ppt/media/image${Object.keys(zip.files).length + 1}.${imgExt}`;
+    zip.file(imgFilename, imgData);
+    return imgFilename;
 }
 
+// Ersetzt Textplatzhalter im XML-Inhalt
+function replaceTextPlaceholders(xmlContent: string, textPlaceholder: string, replacementText: string): string {
+    const parser = new DOMParser();
+    const serializer = new XMLSerializer();
+    const doc = parser.parseFromString(xmlContent, 'application/xml');
+
+    const textNodes = doc.getElementsByTagName('a:t');
+    for (let i = 0; i < textNodes.length; i++) {
+        const textNode = textNodes[i];
+        if (textNode.textContent === textPlaceholder) {
+            textNode.textContent = replacementText;
+        }
+    }
+
+    return serializer.serializeToString(doc);
+}
+
+// Ersetzt Bildplatzhalter im XML-Inhalt
+function replaceImagePlaceholders(xmlContent: string, imagePlaceholder: string, imageId: number): string {
+    const parser = new DOMParser();
+    const serializer = new XMLSerializer();
+    const doc = parser.parseFromString(xmlContent, 'application/xml');
+
+    const blipNodes = doc.getElementsByTagName('a:blip');
+    for (let i = 0; i < blipNodes.length; i++) {
+        const blipNode = blipNodes[i];
+        const parentNode = blipNode.parentNode?.parentNode as HTMLElement;
+        if (parentNode) {
+            const textNodes = parentNode.getElementsByTagName('a:t');
+            for (let j = 0; j < textNodes.length; j++) {
+                const textNode = textNodes[j];
+                if (textNode.textContent === imagePlaceholder) {
+                    blipNode.setAttribute('r:embed', `rId${imageId}`);
+                    textNode.textContent = '';  // Entferne den Textinhalt
+                }
+            }
+        }
+    }
+
+    return serializer.serializeToString(doc);
+}
+
+// Verarbeite die PPTX-Datei
 async function processPPTX(templatePath: string, outputPath: string, data: Record<string, string>): Promise<void> {
-  const content = fs.readFileSync(templatePath, 'binary');
-  const zip = new PizZip(content);
+    const content = readFileSync(templatePath);
+    const zip = new PizZip(content);
 
-  // get all available slides (ppt/slides/slide1.xml, ppt/slides/slide2.xml, usw.)
-  const slideFiles = Object.keys(zip.files).filter(path => path.startsWith('ppt/slides/slide') && path.endsWith('.xml'));
+    let imageIdCounter = 1;
 
-  for (const slideFile of slideFiles) {
-    // read XML content of slides
-    let slideXml = zip.file(slideFile)?.asText() || '';
+    // Verarbeite alle Folien
+    const slideFiles = Object.keys(zip.files).filter(file => file.startsWith('ppt/slides/slide') && file.endsWith('.xml'));
 
-    // replace placeholder in slides
-    slideXml = replacePlaceholders(slideXml, data);
+    for (const slideFile of slideFiles) {
+        let slideXml = zip.file(slideFile)?.asText() || '';
 
-    //return xml content into zip
-    zip.file(slideFile, slideXml);
-  }
+        // Ersetze Textplatzhalter
+        for (const [key, value] of Object.entries(data)) {
+            if (key === 'title') {
+                slideXml = replaceTextPlaceholders(slideXml, `$${key}`, value);
+            }
+        }
 
-  // create PPTX-File and save
-  const modifiedContent = zip.generate({ type: 'nodebuffer' });
-  fs.writeFileSync(outputPath, modifiedContent);
+        // Ersetze Bildplatzhalter
+        for (const [key, imagePath] of Object.entries(data)) {
+            if (key === 'logo') {
+                addImageToZip(zip, imagePath);
+                const imageId = imageIdCounter++;
+                slideXml = replaceImagePlaceholders(slideXml, `$${key}`, imageId);
+            }
+        }
+
+        zip.file(slideFile, slideXml);
+    }
+
+    // Füge die neue Medien-ID in die rels-Datei ein
+    const relsFiles = Object.keys(zip.files).filter(file => file.endsWith('.xml.rels'));
+    for (const relsFile of relsFiles) {
+        let relsXml = zip.file(relsFile)?.asText() || '';
+        relsXml = relsXml.replace(/<\/Relationships>/, `
+            <Relationship Id="rId${imageIdCounter - 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image${imageIdCounter - 1}"/>
+            </Relationships>`);
+        zip.file(relsFile, relsXml);
+    }
+
+    const modifiedContent = zip.generate({ type: 'nodebuffer' });
+    writeFileSync(outputPath, modifiedContent);
 }
 
-// Example usage
-const templatePath = 'one-pager.pptx';
-const outputPath = 'one-pager-output.pptx';
+// Beispielaufruf der Funktion
+const templatePath = 'template.pptx';
+const outputPath = 'output.pptx';
 const data = {
-  title: 'That is an example title'
+    title: 'Dies ist der neue Titel',
+    logo: 'example.png'
 };
 
-processPPTX(templatePath, outputPath, data).then(() => {
-  console.log('PPTX-Datei erfolgreich bearbeitet.');
-}).catch(err => {
-  console.error('Fehler beim Bearbeiten der PPTX-Datei:', err);
-});
+processPPTX(templatePath, outputPath, data)
+    .then(() => console.log('PPTX-Datei erfolgreich verarbeitet!'))
+    .catch(err => console.error('Fehler beim Verarbeiten der PPTX-Datei:', err));
