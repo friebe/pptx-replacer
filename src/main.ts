@@ -1,112 +1,123 @@
-import PizZip from 'pizzip';
-import { readFileSync, writeFileSync } from 'fs';
-import { DOMParser, XMLSerializer } from '@xmldom/xmldom'
+import AdmZip from 'adm-zip';
+import * as xml2js from 'xml2js';
+import * as fs from 'fs';
+import * as path from 'path';
 
-// Fügt ein Bild in das ZIP-Archiv ein
-function addImageToZip(zip: PizZip, imagePath: string): string {
-    const imgData = readFileSync(imagePath);
-    const imgExt = imagePath.split('.').pop();
-    const imgFilename = `ppt/media/image${Object.keys(zip.files).length + 1}.${imgExt}`;
-    zip.file(imgFilename, imgData);
-    return imgFilename;
+interface PlaceholderReplacements {
+    [key: string]: string;
 }
 
-// Ersetzt Textplatzhalter im XML-Inhalt
-function replaceTextPlaceholders(xmlContent: string, textPlaceholder: string, replacementText: string): string {
-    const parser = new DOMParser();
-    const serializer = new XMLSerializer();
-    const doc = parser.parseFromString(xmlContent, 'application/xml');
+async function replacePlaceholdersInXml(xmlContent: string, replacements: PlaceholderReplacements) {
+    const parser = new xml2js.Parser();
+    const builder = new xml2js.Builder();
 
-    const textNodes = doc.getElementsByTagName('a:t');
-    for (let i = 0; i < textNodes.length; i++) {
-        const textNode = textNodes[i];
-        if (textNode.textContent === textPlaceholder) {
-            textNode.textContent = replacementText;
-        }
-    }
+    const result = await parser.parseStringPromise(xmlContent);
 
-    return serializer.serializeToString(doc);
-}
-
-// Ersetzt Bildplatzhalter im XML-Inhalt
-function replaceImagePlaceholders(xmlContent: string, imagePlaceholder: string, imageId: number): string {
-    const parser = new DOMParser();
-    const serializer = new XMLSerializer();
-    const doc = parser.parseFromString(xmlContent, 'application/xml');
-
-    const blipNodes = doc.getElementsByTagName('a:blip');
-    for (let i = 0; i < blipNodes.length; i++) {
-        const blipNode = blipNodes[i];
-        const parentNode = blipNode.parentNode?.parentNode as HTMLElement;
-        if (parentNode) {
-            const textNodes = parentNode.getElementsByTagName('a:t');
-            for (let j = 0; j < textNodes.length; j++) {
-                const textNode = textNodes[j];
-                if (textNode.textContent === imagePlaceholder) {
-                    blipNode.setAttribute('r:embed', `rId${imageId}`);
-                    textNode.textContent = '';  // Entferne den Textinhalt
+    const replaceInObject = (obj: any) => {
+        for (const key in obj) {
+            if (typeof obj[key] === 'string') {
+                for (const [placeholder, replacement] of Object.entries(replacements)) {
+                    obj[key] = obj[key].replace(new RegExp(placeholder, 'g'), replacement);
                 }
+            } else if (typeof obj[key] === 'object') {
+                replaceInObject(obj[key]);
             }
         }
-    }
+    };
 
-    return serializer.serializeToString(doc);
+    replaceInObject(result);
+
+    return builder.buildObject(result);
 }
 
-// Verarbeite die PPTX-Datei
-async function processPPTX(templatePath: string, outputPath: string, data: Record<string, string>): Promise<void> {
-    const content = readFileSync(templatePath);
-    const zip = new PizZip(content);
+async function addImageToSlide(zip: AdmZip, slideEntryName: string, imagePath: string, relsEntryName: string) {
+    const imageEntryName = `ppt/media/${path.basename(imagePath)}`;
+    const imageData = fs.readFileSync(imagePath);
+    zip.addFile(imageEntryName, imageData);
 
-    let imageIdCounter = 1;
+    const relsEntry = zip.getEntry(relsEntryName);
+    let newRelId: string | undefined;
 
-    // Verarbeite alle Folien
-    const slideFiles = Object.keys(zip.files).filter(file => file.startsWith('ppt/slides/slide') && file.endsWith('.xml'));
+    if (relsEntry) {
+        const relsContent = relsEntry.getData().toString('utf8');
+        const parser = new xml2js.Parser();
+        const builder = new xml2js.Builder();
+        const relsXml = await parser.parseStringPromise(relsContent);
 
-    for (const slideFile of slideFiles) {
-        let slideXml = zip.file(slideFile)?.asText() || '';
-
-        // Ersetze Textplatzhalter
-        for (const [key, value] of Object.entries(data)) {
-            if (key === 'title') {
-                slideXml = replaceTextPlaceholders(slideXml, `$${key}`, value);
-            }
+        if (!relsXml.Relationships) {
+            relsXml.Relationships = {};
+        }
+        if (!relsXml.Relationships.Relationship) {
+            relsXml.Relationships.Relationship = [];
         }
 
-        // Ersetze Bildplatzhalter
-        for (const [key, imagePath] of Object.entries(data)) {
-            if (key === 'logo') {
-                addImageToZip(zip, imagePath);
-                const imageId = imageIdCounter++;
-                slideXml = replaceImagePlaceholders(slideXml, `$${key}`, imageId);
+        newRelId = `rId${relsXml.Relationships.Relationship.length + 1}`;
+        relsXml.Relationships.Relationship.push({
+            $: {
+                Id: newRelId,
+                Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+                Target: `../media/${path.basename(imagePath)}`
             }
-        }
+        });
 
-        zip.file(slideFile, slideXml);
+        const updatedRelsXml = builder.buildObject(relsXml);
+        zip.updateFile(relsEntry.entryName, Buffer.from(updatedRelsXml, 'utf8'));
     }
 
-    // Füge die neue Medien-ID in die rels-Datei ein
-    const relsFiles = Object.keys(zip.files).filter(file => file.endsWith('.xml.rels'));
-    for (const relsFile of relsFiles) {
-        let relsXml = zip.file(relsFile)?.asText() || '';
-        relsXml = relsXml.replace(/<\/Relationships>/, `
-            <Relationship Id="rId${imageIdCounter - 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image${imageIdCounter - 1}"/>
-            </Relationships>`);
-        zip.file(relsFile, relsXml);
-    }
+    const slideEntry = zip.getEntry(slideEntryName);
+    if (slideEntry && newRelId) {
+        const slideContent = slideEntry.getData().toString('utf8');
+        const parser = new xml2js.Parser();
+        const builder = new xml2js.Builder();
+        const slideXml = await parser.parseStringPromise(slideContent);
 
-    const modifiedContent = zip.generate({ type: 'nodebuffer' });
-    writeFileSync(outputPath, modifiedContent);
+        // Finde und ersetze r:embed im p:cNvPr und a:blip
+        slideXml['p:sld']['p:cSld'][0]['p:spTree'][0]['p:pic'].forEach((pic: any) => {
+            if (pic['p:nvPicPr'] && pic['p:nvPicPr'][0]['p:cNvPr'] && pic['p:nvPicPr'][0]['p:cNvPr'][0].$.descr === 'LOGO_PLACEHOLDER') {
+                pic['p:nvPicPr'][0]['p:cNvPr'][0].$['r:embed'] = newRelId;
+            }
+            if (pic['p:blipFill'] && pic['p:blipFill'][0]['a:blip'] && pic['p:blipFill'][0]['a:blip'][0].$['r:embed']) {
+                pic['p:blipFill'][0]['a:blip'][0].$['r:embed'] = newRelId;
+            }
+        });
+
+
+        const updatedSlideXml = builder.buildObject(slideXml);
+        zip.updateFile(slideEntry.entryName, Buffer.from(updatedSlideXml, 'utf8'));
+    }
 }
 
-// Beispielaufruf der Funktion
-const templatePath = 'template.pptx';
-const outputPath = 'output.pptx';
-const data = {
-    title: 'Dies ist der neue Titel',
-    logo: 'example.png'
+async function replacePlaceholders(templatePath: string, outputPath: string, replacements: PlaceholderReplacements) {
+    const zip = new AdmZip(templatePath);
+    const zipEntries = zip.getEntries();
+
+    for (const zipEntry of zipEntries) {
+        if (zipEntry.entryName.endsWith('.xml')) {
+            const xmlContent = zipEntry.getData().toString('utf8');
+            const updatedXml = await replacePlaceholdersInXml(xmlContent, replacements);
+            zip.updateFile(zipEntry.entryName, Buffer.from(updatedXml, 'utf8'));
+        }
+    }
+
+    if (replacements['{{IMAGE_PLACEHOLDER}}']) {
+        const imagePath = replacements['{{IMAGE_PLACEHOLDER}}'];
+        const slideEntryName = 'ppt/slides/slide1.xml';  // Anpassung: Die richtige Folie anpassen
+        const relsEntryName = 'ppt/slides/_rels/slide1.xml.rels';
+        await addImageToSlide(zip, slideEntryName, imagePath, relsEntryName);
+    }
+
+    zip.writeZip(outputPath);
+    console.log('Platzhalter ersetzt und neue Präsentation erstellt!');
+}
+
+const replacements: PlaceholderReplacements = {
+    '{{TITLE_PLACEHOLDER}}': 'Neuer Titel',
+    '{{IMAGE_PLACEHOLDER}}': 'avatar.png'  // Pfad zum Bild
 };
 
-processPPTX(templatePath, outputPath, data)
-    .then(() => console.log('PPTX-Datei erfolgreich verarbeitet!'))
-    .catch(err => console.error('Fehler beim Verarbeiten der PPTX-Datei:', err));
+const templatePath = 'template.pptx'; // Pfad zur Template-Datei
+const outputPath = 'output.pptx';   // Pfad zur Ausgabedatei
+
+replacePlaceholders(templatePath, outputPath, replacements).catch(err => {
+    console.error('Fehler beim Ersetzen der Platzhalter:', err);
+});
