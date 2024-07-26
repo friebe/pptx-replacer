@@ -71,7 +71,7 @@ async function addImageToSlide(zip: AdmZip, slideEntryName: string, imagePath: s
         const builder = new xml2js.Builder();
         const slideXml = await parser.parseStringPromise(slideContent);
 
-        // Finde und ersetze r:embed im p:cNvPr und a:blip
+        // find und replace r:embed im p:cNvPr und a:blip to establish a successful relationship of the image
         slideXml['p:sld']['p:cSld'][0]['p:spTree'][0]['p:pic'].forEach((pic: any) => {
             if (pic['p:nvPicPr'] && pic['p:nvPicPr'][0]['p:cNvPr'] && pic['p:nvPicPr'][0]['p:cNvPr'][0].$.descr === 'LOGO_PLACEHOLDER') {
                 pic['p:nvPicPr'][0]['p:cNvPr'][0].$['r:embed'] = newRelId;
@@ -101,23 +101,24 @@ async function replacePlaceholders(templatePath: string, outputPath: string, rep
 
     if (replacements['{{IMAGE_PLACEHOLDER}}']) {
         const imagePath = replacements['{{IMAGE_PLACEHOLDER}}'];
-        const slideEntryName = 'ppt/slides/slide1.xml';  // Anpassung: Die richtige Folie anpassen
+        const slideEntryName = 'ppt/slides/slide1.xml';
         const relsEntryName = 'ppt/slides/_rels/slide1.xml.rels';
         await addImageToSlide(zip, slideEntryName, imagePath, relsEntryName);
     }
 
     zip.writeZip(outputPath);
-    console.log('Platzhalter ersetzt und neue Präsentation erstellt!');
+    console.log('Placeholder replaced and new presentation created!!');
 }
 
 const replacements: PlaceholderReplacements = {
-    '{{TITLE_PLACEHOLDER}}': 'Neuer Titel',
-    '{{IMAGE_PLACEHOLDER}}': 'avatar.png'  // Pfad zum Bild
+    '{{TITLE_PLACEHOLDER}}': 'My wonderful title',
+    '{{SUBTITLE_PLACEHOLDER}}': 'My wonderful subtitle',
+    '{{IMAGE_PLACEHOLDER}}': 'example.jpg'
 };
 
-const templatePath = 'template.pptx'; // Pfad zur Template-Datei
-const outputPath = 'output.pptx';   // Pfad zur Ausgabedatei
+const templatePath = 'windows-template.pptx';
+const outputPath = 'output.pptx';
 
 replacePlaceholders(templatePath, outputPath, replacements).catch(err => {
-    console.error('Fehler beim Ersetzen der Platzhalter:', err);
+    console.error('Error when replacing the placeholders:', err);
 });
