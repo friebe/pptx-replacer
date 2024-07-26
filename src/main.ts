@@ -10,14 +10,26 @@ interface PlaceholderReplacements {
 async function replacePlaceholdersInXml(xmlContent: string, replacements: PlaceholderReplacements) {
     const parser = new xml2js.Parser();
     const builder = new xml2js.Builder();
-
     const result = await parser.parseStringPromise(xmlContent);
+
+    const replaceInTextNode = (textNode: any, replacement: string) => {
+        if (typeof replacement === 'string' && replacement.includes('\n')) {
+            const lines = replacement.split('\n').map(line => ({
+                'a:r': [{ 'a:t': line }]
+            }));
+            textNode['a:p'] = lines.map(line => ({ 'a:r': line['a:r'] }));
+        } else {
+            textNode['a:r'] = [{ 'a:t': replacement }];
+        }
+    };
 
     const replaceInObject = (obj: any) => {
         for (const key in obj) {
             if (typeof obj[key] === 'string') {
                 for (const [placeholder, replacement] of Object.entries(replacements)) {
-                    obj[key] = obj[key].replace(new RegExp(placeholder, 'g'), replacement);
+                    if (obj[key].includes(placeholder)) {
+                        obj[key] = obj[key].replace(new RegExp(placeholder, 'g'), replacement);
+                    }
                 }
             } else if (typeof obj[key] === 'object') {
                 replaceInObject(obj[key]);
@@ -25,6 +37,21 @@ async function replacePlaceholdersInXml(xmlContent: string, replacements: Placeh
         }
     };
 
+    const traverseObject = (obj: any) => {
+        for (const key in obj) {
+            if (key === 'a:t' && typeof obj[key] === 'string') {
+                for (const [placeholder] of Object.entries(replacements)) {
+                    if (obj[key].includes(placeholder)) {
+                        replaceInTextNode(obj, placeholder);
+                    }
+                }
+            } else if (typeof obj[key] === 'object') {
+                traverseObject(obj[key]);
+            }
+        }
+    };
+
+    traverseObject(result);
     replaceInObject(result);
 
     return builder.buildObject(result);
@@ -111,12 +138,13 @@ async function replacePlaceholders(templatePath: string, outputPath: string, rep
 }
 
 const replacements: PlaceholderReplacements = {
-    '{{TITLE_PLACEHOLDER}}': 'My wonderful title',
-    '{{SUBTITLE_PLACEHOLDER}}': 'My wonderful subtitle',
-    '{{IMAGE_PLACEHOLDER}}': 'example.jpg'
+    '{{NAME_PLACEHOLDER}}': 'Max Mustermann',
+    '{{ROLE_PLACEHOLDER}}': 'Fullstack\n\ndeveloper',
+    '{{IMAGE_PLACEHOLDER}}': 'example.jpg',
+    '{{VITATEXT_PLACEHOLDER}}': 'Bello, amigos!\nMe and you go on big adventure, find golden banana and have lots of fun.\n\nWe laugh, play, and dance all day long, make everyone smile big-big. We discover new things, go to exciting places, and enjoy yummy snacks. No stop until find all bananas and make world happy. Together, we are unstoppable, ha-ha! So, let’s go and make today the best day ever!'
 };
 
-const templatePath = 'windows-template.pptx';
+const templatePath = 'mac-template.pptx';
 const outputPath = 'output.pptx';
 
 replacePlaceholders(templatePath, outputPath, replacements).catch(err => {
